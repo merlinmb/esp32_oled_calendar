@@ -18,7 +18,8 @@ void config_defaults(AppConfig &cfg) {
 void config_load(AppConfig &cfg) {
     config_defaults(cfg);
     Preferences prefs;
-    prefs.begin(NVS_NS, true);
+    // Open read-write so namespace is created on first boot (avoids NOT_FOUND error)
+    if (!prefs.begin(NVS_NS, false)) return;
     prefs.getString("wifi_ssid",  cfg.wifi_ssid,     sizeof(cfg.wifi_ssid));
     prefs.getString("wifi_pass",  cfg.wifi_password, sizeof(cfg.wifi_password));
     prefs.getString("server_url", cfg.server_url,    sizeof(cfg.server_url));
