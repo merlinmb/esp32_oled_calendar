@@ -1,4 +1,118 @@
 #include "web_server.h"
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <string.h>
+#include <stdlib.h>
+
 bool g_ap_mode = false;
-void ws_start_ap(AppConfig &cfg) {}
-void ws_handle() {}
+
+static WebServer  s_server(80);
+static DNSServer  s_dns;
+static AppConfig *s_cfg_ptr = nullptr;
+
+static const char SETUP_HTML[] PROGMEM = R"rawhtml(
+<!DOCTYPE html><html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Calendar Setup</title>
+<style>
+  body{background:#0b0c11;color:#e8eaf2;font-family:system-ui,sans-serif;
+       display:flex;justify-content:center;padding:20px}
+  .card{background:#111318;border-radius:10px;padding:24px;width:100%;max-width:420px}
+  h1{color:#5b8ef0;font-size:18px;margin:0 0 20px}
+  label{display:block;color:#8b90aa;font-size:12px;margin:12px 0 4px}
+  input{width:100%;box-sizing:border-box;background:#1e202c;border:1px solid rgba(255,255,255,0.12);
+        border-radius:6px;color:#e8eaf2;padding:8px 10px;font-size:14px}
+  button{margin-top:20px;width:100%;background:#5b8ef0;color:#0b0c11;border:none;
+         border-radius:6px;padding:10px;font-size:15px;font-weight:600;cursor:pointer}
+  .note{color:#8b90aa;font-size:11px;margin-top:6px}
+</style>
+</head><body><div class="card">
+<h1>nextUp &mdash; Calendar Setup</h1>
+<form method="POST" action="/save">
+  <label>WiFi SSID</label>
+  <input name="ssid" required maxlength="63">
+  <label>WiFi Password</label>
+  <input name="pass" type="password" maxlength="63">
+  <label>Calendar Server URL</label>
+  <input name="url" value="https://calendar.mcmdhome.com/jsonCalendar?timeframe=1d" maxlength="255">
+  <label>Read Token <span class="note">(optional)</span></label>
+  <input name="token" maxlength="127">
+  <label>Refresh Interval (seconds, 60&ndash;3600)</label>
+  <input name="refresh" type="number" value="300" min="60" max="3600">
+  <button type="submit">Save &amp; Restart</button>
+</form>
+</div></body></html>
+)rawhtml";
+
+static void handle_root() {
+    s_server.send_P(200, "text/html", SETUP_HTML);
+}
+
+static void handle_save() {
+    if (!s_cfg_ptr) { s_server.send(500, "text/plain", "err"); return; }
+
+    String ssid = s_server.arg("ssid");
+    if (ssid.length() == 0) {
+        s_server.send(400, "text/plain", "SSID required");
+        return;
+    }
+
+    strncpy(s_cfg_ptr->wifi_ssid,     ssid.c_str(), sizeof(s_cfg_ptr->wifi_ssid) - 1);
+    s_cfg_ptr->wifi_ssid[sizeof(s_cfg_ptr->wifi_ssid) - 1] = '\0';
+
+    String pass = s_server.arg("pass");
+    strncpy(s_cfg_ptr->wifi_password, pass.c_str(), sizeof(s_cfg_ptr->wifi_password) - 1);
+    s_cfg_ptr->wifi_password[sizeof(s_cfg_ptr->wifi_password) - 1] = '\0';
+
+    String url = s_server.arg("url");
+    if (url.length() > 0) {
+        strncpy(s_cfg_ptr->server_url, url.c_str(), sizeof(s_cfg_ptr->server_url) - 1);
+        s_cfg_ptr->server_url[sizeof(s_cfg_ptr->server_url) - 1] = '\0';
+    }
+
+    String token = s_server.arg("token");
+    strncpy(s_cfg_ptr->read_token, token.c_str(), sizeof(s_cfg_ptr->read_token) - 1);
+    s_cfg_ptr->read_token[sizeof(s_cfg_ptr->read_token) - 1] = '\0';
+
+    int refresh = s_server.arg("refresh").toInt();
+    if (refresh < 60 || refresh > 3600) refresh = 300;
+    s_cfg_ptr->refresh_secs = (uint16_t)refresh;
+
+    config_save(*s_cfg_ptr);
+
+    s_server.send(200, "text/html",
+        "<!DOCTYPE html><html><body style='background:#0b0c11;color:#e8eaf2;"
+        "font-family:system-ui;display:flex;justify-content:center;padding:40px'>"
+        "<div style='text-align:center'>"
+        "<p style='color:#5b8ef0;font-size:20px'>Saved! Restarting...</p>"
+        "</div></body></html>");
+    delay(1500);
+    ESP.restart();
+}
+
+void ws_start_ap(AppConfig &cfg) {
+    s_cfg_ptr = &cfg;
+    g_ap_mode = true;
+
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("CalendarSetup");
+    delay(100);
+
+    s_dns.start(53, "*", WiFi.softAPIP());
+
+    s_server.on("/",     HTTP_GET,  handle_root);
+    s_server.on("/save", HTTP_POST, handle_save);
+    s_server.onNotFound([]() {
+        // Captive portal redirect — any URL triggers setup page
+        s_server.sendHeader("Location", "http://192.168.4.1/", true);
+        s_server.send(302, "text/plain", "");
+    });
+    s_server.begin();
+}
+
+void ws_handle() {
+    s_dns.processNextRequest();
+    s_server.handleClient();
+}
