@@ -80,14 +80,18 @@ static void draw_header(bool offline) {
 // ── Public API ─────────────────────────────────────────────────
 
 void display_init() {
+    // GPIO15 = PIN_POWER_ON: must be HIGH or the display stays dark
+    pinMode(15, OUTPUT);
+    digitalWrite(15, HIGH);
+
+    // GPIO38 = TFT_BL backlight: drive HIGH explicitly before init
+    pinMode(38, OUTPUT);
+    digitalWrite(38, HIGH);
+
     s_tft.init();
     s_tft.setRotation(1);       // Landscape, USB connector on left
     s_tft.fillScreen(C_BG_BASE);
     s_tft.setSwapBytes(true);
-
-    // Backlight on (GPIO 38)
-    pinMode(38, OUTPUT);
-    digitalWrite(38, HIGH);
 
     s_spr.createSprite(W, H);
     s_spr.setSwapBytes(true);
