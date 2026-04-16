@@ -1,15 +1,21 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <time.h>
+#include <WiFiUdp.h>
+#include <NTPClient.h>
+#include <TimeLib.h>
 #include <string.h>
 #include "config.h"
 #include "web_server.h"
 #include "display.h"
 #include "calendar_api.h"
+#include "timezone_db.h"
 
 static AppConfig     g_cfg;
 static CalEvent      g_event;
 static bool          g_offline      = false;
+static WiFiUDP       g_udp;
+static NTPClient     g_ntp(g_udp, "pool.ntp.org", 0, 60000);
+static Timezone     *g_tz   = nullptr;
 
 static unsigned long g_last_clock    = 0;
 static unsigned long g_last_progress = 0;
@@ -17,16 +23,21 @@ static unsigned long g_last_fetch    = 0;
 static bool          g_first_fetch   = true;  // Force fetch immediately on first loop
 
 static void sync_time() {
-    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-    // Wait up to 5 seconds for a valid timestamp
-    time_t now = 0;
-    int attempts = 0;
-    while (now < 1000000000UL && attempts < 50) {
-        delay(100);
-        now = time(nullptr);
-        attempts++;
+    g_tz = tz_lookup(g_cfg.timezone);
+
+    g_ntp.begin();
+    // Force an immediate update; retry up to 10 times (~5 s)
+    bool ok = false;
+    for (int i = 0; i < 10 && !ok; i++) {
+        ok = g_ntp.forceUpdate();
+        if (!ok) delay(500);
     }
-    Serial.printf("[ntp] Time synced: %ld\n", (long)now);
+
+    time_t utc = (time_t)g_ntp.getEpochTime();
+    time_t local = g_tz->toLocal(utc);
+    setTime(local);
+    Serial.printf("[ntp] UTC=%ld  local=%ld  tz=%s\n",
+                  (long)utc, (long)local, g_cfg.timezone);
 }
 
 void setup() {
@@ -68,17 +79,26 @@ void setup() {
 
     Serial.printf("[boot] WiFi connected. IP: %s\n", WiFi.localIP().toString().c_str());
     sync_time();
+    ws_start_sta(g_cfg);
 
     memset(&g_event, 0, sizeof(g_event));
 }
 
 void loop() {
+    ws_handle();
+
     if (g_ap_mode) {
-        ws_handle();
         return;
     }
 
     unsigned long now = millis();
+
+    // NTP resync — NTPClient polls every 60 s internally; re-apply DST each time
+    if (g_ntp.update()) {
+        time_t utc   = (time_t)g_ntp.getEpochTime();
+        time_t local = g_tz->toLocal(utc);
+        setTime(local);
+    }
 
     // Calendar fetch — immediately on first loop, then every refresh_secs
     if (g_first_fetch || (now - g_last_fetch >= (unsigned long)g_cfg.refresh_secs * 1000UL)) {
