@@ -4,6 +4,7 @@
 #include <DNSServer.h>
 #include <string.h>
 #include <stdlib.h>
+#include "timezone_db.h"
 
 bool g_ap_mode = false;
 
@@ -11,43 +12,60 @@ static WebServer  s_server(80);
 static DNSServer  s_dns;
 static AppConfig *s_cfg_ptr = nullptr;
 
-static const char SETUP_HTML[] PROGMEM = R"rawhtml(
-<!DOCTYPE html><html><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Calendar Setup</title>
-<style>
-  body{background:#0b0c11;color:#e8eaf2;font-family:system-ui,sans-serif;
-       display:flex;justify-content:center;padding:20px}
-  .card{background:#111318;border-radius:10px;padding:24px;width:100%;max-width:420px}
-  h1{color:#5b8ef0;font-size:18px;margin:0 0 20px}
-  label{display:block;color:#8b90aa;font-size:12px;margin:12px 0 4px}
-  input{width:100%;box-sizing:border-box;background:#1e202c;border:1px solid rgba(255,255,255,0.12);
-        border-radius:6px;color:#e8eaf2;padding:8px 10px;font-size:14px}
-  button{margin-top:20px;width:100%;background:#5b8ef0;color:#0b0c11;border:none;
-         border-radius:6px;padding:10px;font-size:15px;font-weight:600;cursor:pointer}
-  .note{color:#8b90aa;font-size:11px;margin-top:6px}
-</style>
-</head><body><div class="card">
-<h1>nextUp &mdash; Calendar Setup</h1>
-<form method="POST" action="/save">
-  <label>WiFi SSID</label>
-  <input name="ssid" required maxlength="63">
-  <label>WiFi Password</label>
-  <input name="pass" type="password" maxlength="63">
-  <label>Calendar Server URL</label>
-  <input name="url" value="https://calendar.mcmdhome.com/jsonCalendar?timeframe=1d" maxlength="255">
-  <label>Read Token <span class="note">(optional)</span></label>
-  <input name="token" maxlength="127">
-  <label>Refresh Interval (seconds, 60&ndash;3600)</label>
-  <input name="refresh" type="number" value="300" min="60" max="3600">
-  <button type="submit">Save &amp; Restart</button>
-</form>
-</div></body></html>
-)rawhtml";
-
 static void handle_root() {
-    s_server.send_P(200, "text/html", SETUP_HTML);
+    // Build timezone <select> options from the lookup table
+    String tz_opts = "";
+    const char* const* names = tz_names();
+    int count = tz_count();
+    const char* saved_tz = s_cfg_ptr ? s_cfg_ptr->timezone : "Europe/London";
+    for (int i = 0; i < count; i++) {
+        tz_opts += "<option value=\"";
+        tz_opts += names[i];
+        tz_opts += "\"";
+        if (strcmp(names[i], saved_tz) == 0) tz_opts += " selected";
+        tz_opts += ">";
+        tz_opts += names[i];
+        tz_opts += "</option>";
+    }
+
+    String html = F("<!DOCTYPE html><html><head>"
+        "<meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Calendar Setup</title>"
+        "<style>"
+        "body{background:#0b0c11;color:#e8eaf2;font-family:system-ui,sans-serif;"
+        "display:flex;justify-content:center;padding:20px}"
+        ".card{background:#111318;border-radius:10px;padding:24px;width:100%;max-width:420px}"
+        "h1{color:#5b8ef0;font-size:18px;margin:0 0 20px}"
+        "label{display:block;color:#8b90aa;font-size:12px;margin:12px 0 4px}"
+        "input,select{width:100%;box-sizing:border-box;background:#1e202c;"
+        "border:1px solid rgba(255,255,255,0.12);border-radius:6px;"
+        "color:#e8eaf2;padding:8px 10px;font-size:14px}"
+        "button{margin-top:20px;width:100%;background:#5b8ef0;color:#0b0c11;border:none;"
+        "border-radius:6px;padding:10px;font-size:15px;font-weight:600;cursor:pointer}"
+        ".note{color:#8b90aa;font-size:11px;margin-top:6px}"
+        "</style>"
+        "</head><body><div class='card'>"
+        "<h1>nextUp &mdash; Calendar Setup</h1>"
+        "<form method='POST' action='/save'>"
+        "<label>WiFi SSID</label>"
+        "<input name='ssid' required maxlength='63'>"
+        "<label>WiFi Password</label>"
+        "<input name='pass' type='password' maxlength='63'>"
+        "<label>Calendar Server URL</label>"
+        "<input name='url' value='https://calendar.mcmdhome.com/jsonCalendar?timeframe=1d' maxlength='255'>"
+        "<label>Read Token <span class='note'>(optional)</span></label>"
+        "<input name='token' maxlength='127'>"
+        "<label>Timezone</label>"
+        "<select name='tz'>");
+    html += tz_opts;
+    html += F("</select>"
+        "<label>Refresh Interval (seconds, 60&ndash;3600)</label>"
+        "<input name='refresh' type='number' value='300' min='60' max='3600'>"
+        "<button type='submit'>Save &amp; Restart</button>"
+        "</form></div></body></html>");
+
+    s_server.send(200, "text/html", html);
 }
 
 static void handle_save() {
@@ -75,6 +93,12 @@ static void handle_save() {
     String token = s_server.arg("token");
     strncpy(s_cfg_ptr->read_token, token.c_str(), sizeof(s_cfg_ptr->read_token) - 1);
     s_cfg_ptr->read_token[sizeof(s_cfg_ptr->read_token) - 1] = '\0';
+
+    String tz = s_server.arg("tz");
+    if (tz.length() > 0) {
+        strncpy(s_cfg_ptr->timezone, tz.c_str(), sizeof(s_cfg_ptr->timezone) - 1);
+        s_cfg_ptr->timezone[sizeof(s_cfg_ptr->timezone) - 1] = '\0';
+    }
 
     int refresh = s_server.arg("refresh").toInt();
     if (refresh < 60 || refresh > 3600) refresh = 300;
@@ -110,6 +134,16 @@ void ws_start_ap(AppConfig &cfg) {
         s_server.send(302, "text/plain", "");
     });
     s_server.begin();
+}
+
+void ws_start_sta(AppConfig &cfg) {
+    s_cfg_ptr = &cfg;
+    // g_ap_mode stays false — normal loop continues alongside web server
+
+    s_server.on("/",     HTTP_GET,  handle_root);
+    s_server.on("/save", HTTP_POST, handle_save);
+    s_server.begin();
+    Serial.printf("[web] Config server running at http://%s/\n", WiFi.localIP().toString().c_str());
 }
 
 void ws_handle() {
