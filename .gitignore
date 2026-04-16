@@ -2,6 +2,10 @@
 .vscode/
 *.swp
 
+# Secrets — never commit these
+include/secrets.h
+secrets.h
+
 # Compiled Object files
 *.slo
 *.lo
