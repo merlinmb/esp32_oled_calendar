@@ -28,6 +28,8 @@ secrets.h
 *.out
 *.app
 
+.claude/
 .claude
 docs/
 docs
+.pio

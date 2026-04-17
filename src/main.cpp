@@ -115,7 +115,7 @@ void loop() {
 
         Serial.println("[loop] Fetching calendar...");
         CalEvent tmp;
-        bool ok = calendar_fetch(g_cfg, tmp, g_tz);
+        bool ok = calendar_fetch(g_cfg, tmp);
 
         if (ok) {
             g_event   = tmp;
