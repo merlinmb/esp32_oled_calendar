@@ -27,3 +27,7 @@ secrets.h
 *.exe
 *.out
 *.app
+
+.claude
+docs/
+docs
