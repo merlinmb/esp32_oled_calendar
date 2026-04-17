@@ -8,6 +8,10 @@
 
 bool g_ap_mode = false;
 
+static const char *DEFAULT_MQTT_HOST = "192.168.1.55";
+static const uint16_t DEFAULT_MQTT_PORT = 1883;
+static const char *DEFAULT_MQTT_TOPIC = "cmnd/mcmddevices/brightnesspercentage";
+
 static WebServer  s_server(80);
 static DNSServer  s_dns;
 static AppConfig *s_cfg_ptr = nullptr;
@@ -61,7 +65,21 @@ static void handle_root() {
     html += tz_opts;
     html += F("</select>"
         "<label>Refresh Interval (seconds, 60&ndash;3600)</label>"
-        "<input name='refresh' type='number' value='300' min='60' max='3600'>"
+        "<input name='refresh' type='number' min='60' max='3600' value='");
+    html += String(s_cfg_ptr ? s_cfg_ptr->refresh_secs : 300);
+    html += F("'>"
+        "<label>MQTT Host</label>"
+        "<input name='mqtt_host' maxlength='63' value='");
+    html += String(s_cfg_ptr ? s_cfg_ptr->mqtt_host : DEFAULT_MQTT_HOST);
+    html += F("'>"
+        "<label>MQTT Port</label>"
+        "<input name='mqtt_port' type='number' min='1' max='65535' value='");
+    html += String(s_cfg_ptr ? s_cfg_ptr->mqtt_port : DEFAULT_MQTT_PORT);
+    html += F("'>"
+        "<label>MQTT Brightness Topic</label>"
+        "<input name='mqtt_topic' maxlength='127' value='");
+    html += String(s_cfg_ptr ? s_cfg_ptr->mqtt_topic : DEFAULT_MQTT_TOPIC);
+    html += F("'>"
         "<button type='submit'>Save &amp; Restart</button>"
         "</form></div></body></html>");
 
@@ -103,6 +121,20 @@ static void handle_save() {
     int refresh = s_server.arg("refresh").toInt();
     if (refresh < 60 || refresh > 3600) refresh = 300;
     s_cfg_ptr->refresh_secs = (uint16_t)refresh;
+
+    String mqtt_host = s_server.arg("mqtt_host");
+    const char *mqtt_host_value = mqtt_host.length() > 0 ? mqtt_host.c_str() : DEFAULT_MQTT_HOST;
+    strncpy(s_cfg_ptr->mqtt_host, mqtt_host_value, sizeof(s_cfg_ptr->mqtt_host) - 1);
+    s_cfg_ptr->mqtt_host[sizeof(s_cfg_ptr->mqtt_host) - 1] = '\0';
+
+    int mqtt_port = s_server.arg("mqtt_port").toInt();
+    if (mqtt_port < 1 || mqtt_port > 65535) mqtt_port = DEFAULT_MQTT_PORT;
+    s_cfg_ptr->mqtt_port = (uint16_t)mqtt_port;
+
+    String mqtt_topic = s_server.arg("mqtt_topic");
+    const char *mqtt_topic_value = mqtt_topic.length() > 0 ? mqtt_topic.c_str() : DEFAULT_MQTT_TOPIC;
+    strncpy(s_cfg_ptr->mqtt_topic, mqtt_topic_value, sizeof(s_cfg_ptr->mqtt_topic) - 1);
+    s_cfg_ptr->mqtt_topic[sizeof(s_cfg_ptr->mqtt_topic) - 1] = '\0';
 
     config_save(*s_cfg_ptr);
 
@@ -147,6 +179,6 @@ void ws_start_sta(AppConfig &cfg) {
 }
 
 void ws_handle() {
-    s_dns.processNextRequest();
+    if (g_ap_mode) s_dns.processNextRequest();
     s_server.handleClient();
 }

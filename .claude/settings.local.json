@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//e/GoogleDrive/Arduino/**)",
+      "Bash(pio run *)",
+      "Bash(curl -s --max-time 10 \"https://calendar.mcmdhome.com/jsonCalendar?timeframe=1d\")",
+      "Bash(powershell -Command \"Get-PnpDevice -Class Ports -Status OK | Select-Object FriendlyName, Status | Format-Table -AutoSize\")"
+    ]
+  }
+}

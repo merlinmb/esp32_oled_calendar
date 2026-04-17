@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiUdp.h>
 #include <NTPClient.h>
 #include <TimeLib.h>
 #include <string.h>
@@ -9,6 +8,7 @@
 #include "display.h"
 #include "calendar_api.h"
 #include "timezone_db.h"
+#include "mqtt_client.h"
 
 static AppConfig     g_cfg;
 static CalEvent      g_event;
@@ -17,15 +17,14 @@ static WiFiUDP       g_udp;
 static NTPClient     g_ntp(g_udp, "pool.ntp.org", 0, 60000);
 static Timezone     *g_tz   = nullptr;
 
-static unsigned long g_last_clock    = 0;
-static unsigned long g_last_progress = 0;
-static unsigned long g_last_fetch    = 0;
-static bool          g_first_fetch   = true;  // Force fetch immediately on first loop
+static unsigned long g_last_clock   = 0;
+static unsigned long g_last_breathe = 0;
+static unsigned long g_last_fetch   = 0;
+static bool          g_first_fetch  = true;  // Force fetch immediately on first loop
 
 static void sync_time() {
     g_tz = tz_lookup(g_cfg.timezone);
 
-    g_ntp.begin();
     // Force an immediate update; retry up to 10 times (~5 s)
     bool ok = false;
     for (int i = 0; i < 10 && !ok; i++) {
@@ -78,8 +77,10 @@ void setup() {
     }
 
     Serial.printf("[boot] WiFi connected. IP: %s\n", WiFi.localIP().toString().c_str());
+    g_ntp.begin();
     sync_time();
     ws_start_sta(g_cfg);
+    mqtt_client_init(g_cfg);
 
     memset(&g_event, 0, sizeof(g_event));
 }
@@ -93,11 +94,18 @@ void loop() {
 
     unsigned long now = millis();
 
-    // NTP resync — NTPClient polls every 60 s internally; re-apply DST each time
-    if (g_ntp.update()) {
-        time_t utc   = (time_t)g_ntp.getEpochTime();
-        time_t local = g_tz->toLocal(utc);
-        setTime(local);
+    mqtt_client_tick();
+
+    // NTP resync — check once per minute; NTPClient will only hit the network
+    // every 60 s (its configured interval), avoiding constant parsePacket() errors.
+    static unsigned long s_last_ntp = 0;
+    if (now - s_last_ntp >= 60000UL) {
+        s_last_ntp = now;
+        if (g_ntp.update()) {
+            time_t utc   = (time_t)g_ntp.getEpochTime();
+            time_t local = g_tz->toLocal(utc);
+            setTime(local);
+        }
     }
 
     // Calendar fetch — immediately on first loop, then every refresh_secs
@@ -107,7 +115,7 @@ void loop() {
 
         Serial.println("[loop] Fetching calendar...");
         CalEvent tmp;
-        bool ok = calendar_fetch(g_cfg, tmp);
+        bool ok = calendar_fetch(g_cfg, tmp, g_tz);
 
         if (ok) {
             g_event   = tmp;
@@ -120,8 +128,8 @@ void loop() {
         }
 
         display_render(g_event, g_offline);
-        g_last_clock    = now;
-        g_last_progress = now;
+        g_last_clock   = now;
+        g_last_breathe = now;
     }
 
     // Clock update every second
@@ -130,10 +138,9 @@ void loop() {
         display_update_clock(g_offline);
     }
 
-    // Progress bar + pixel shift every 60 seconds
-    if (now - g_last_progress >= 60000UL) {
-        g_last_progress = now;
-        display_update_progress(g_event);
-        display_advance_pixel_shift();
+    // Breathe (fade out/in + alternate event slot) every 30 seconds
+    if (now - g_last_breathe >= 30000UL) {
+        g_last_breathe = now;
+        display_breathe(g_event, g_offline);
     }
 }

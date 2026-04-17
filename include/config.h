@@ -8,6 +8,9 @@ struct AppConfig {
     char read_token[128];
     char timezone[48];
     uint16_t refresh_secs;
+    char mqtt_host[64];
+    uint16_t mqtt_port;
+    char mqtt_topic[128];
 };
 
 void config_defaults(AppConfig &cfg);

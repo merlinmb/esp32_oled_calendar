@@ -28,16 +28,14 @@ static const int HDR_H    =  26;  // header bar height px
 static const int PAD      =   6;  // card padding
 static const int BAR_H    =   6;  // progress bar height
 static const int BAR_Y    = H - PAD - BAR_H;
-static const int DATE_Y   = HDR_H + PAD;
+static const int DATE_Y   = HDR_H + PAD + 20;
 static const int TITLE_Y  = DATE_Y + 20;   // NotoSansBold15 date row
 static const int TIME_Y   = TITLE_Y + 58;  // 2 title lines × 22px + gap
 static const int LOC_Y    = TIME_Y + 22;
 
-// ── Anti-burn-in pixel shift ───────────────────────────────────
-static const int8_t SHIFTS[4][2] = {{0, 0}, {2, 0}, {2, 2}, {0, 2}};
-static int8_t s_shift_step = 0;
-static int8_t s_shift_x    = 0;
-static int8_t s_shift_y    = 0;
+// ── Breathe / fade state ───────────────────────────────────────
+static bool    s_show_next       = false;  // which slot is currently displayed
+static uint8_t s_brightness      = 255;    // current target brightness (0-255)
 
 // ── TFT and sprite ─────────────────────────────────────────────
 static TFT_eSPI    s_tft;
@@ -46,7 +44,7 @@ static TFT_eSprite s_spr(&s_tft);
 // ── Helpers ────────────────────────────────────────────────────
 
 static void push_sprite() {
-    s_spr.pushSprite(s_shift_x, s_shift_y);
+    s_spr.pushSprite(0, 0);
 }
 
 static void draw_header(bool offline) {
@@ -54,7 +52,7 @@ static void draw_header(bool offline) {
     s_spr.setFreeFont(HEADINGFONT);
     s_spr.setTextColor(C_ACCENT, C_BG_BASE);
     s_spr.setTextSize(1);
-    s_spr.setCursor(6, 4);
+    s_spr.setCursor(6, 20);
     s_spr.print("nextUp");
 
     // Current time HH:MM
@@ -63,16 +61,16 @@ static void draw_header(bool offline) {
 
     s_spr.setFreeFont(TIMEFONT);
     s_spr.setTextColor(C_TEXT_2, C_BG_BASE);
-    int time_x = offline ? W - 130 : W - (int)s_spr.textWidth(buf) - 8;
-    s_spr.setCursor(time_x, 4);
+    int time_x = offline ? W - 140 : W - (int)s_spr.textWidth(buf) - 8;
+    s_spr.setCursor(time_x, 20);
     s_spr.print(buf);
 
     // Offline indicator
     if (offline) {
         s_spr.setFreeFont(TIMEFONT);
         s_spr.setTextColor(C_RED, C_BG_BASE);
-        s_spr.setCursor(W - 70, 4);
-        s_spr.print("OFFLINE");
+        s_spr.setCursor(W - 80, 20);
+        s_spr.print("offline");
     }
 
     // Bottom border line
@@ -86,14 +84,17 @@ void display_init() {
     pinMode(15, OUTPUT);
     digitalWrite(15, HIGH);
 
-    // GPIO38 = TFT_BL backlight: drive HIGH explicitly before init
-    pinMode(38, OUTPUT);
-    digitalWrite(38, HIGH);
-
     s_tft.init();
     s_tft.setRotation(1);       // Landscape, USB connector on left
     s_tft.fillScreen(C_BG_BASE);
     s_tft.setSwapBytes(true);
+
+    // GPIO38 = TFT_BL backlight — set up LEDC PWM after TFT init so we
+    // take over the pin from TFT_eSPI's digitalWrite(HIGH).
+    // ESP32 Arduino core 2.x channel-based API:
+    ledcSetup(0, 10000, 8);     // channel 0, 10 kHz, 8-bit resolution
+    ledcAttachPin(38, 0);       // attach GPIO38 to channel 0
+    ledcWrite(0, 255);          // full brightness
 
     s_spr.createSprite(W, H);
     s_spr.setSwapBytes(true);
@@ -143,18 +144,20 @@ void display_show_connecting() {
     push_sprite();
 }
 
-void display_render(const CalEvent &ev, bool offline) {
-    s_spr.fillSprite(C_BG_BASE);
-    draw_header(offline);
-
-    if (!ev.has_event) {
+// Draw a single event's content into the sprite (header already drawn).
+// title/location/time_start/time_end/is_all_day/ts_start/ts_end are passed
+// directly so this works for both the primary and secondary event slots.
+static void draw_event_content(const char *title, const char *location,
+                                const char *time_start, const char *time_end,
+                                bool is_all_day, int32_t ts_start, int32_t ts_end,
+                                bool has_event, bool show_progress) {
+    if (!has_event) {
         s_spr.setFreeFont(LINEFONT);
         s_spr.setTextColor(C_TEXT_2, C_BG_BASE);
         const char *msg = "No upcoming events";
         int tw = s_spr.textWidth(msg);
         s_spr.setCursor((W - tw) / 2, HDR_H + (H - HDR_H) / 2 - 8);
         s_spr.print(msg);
-        push_sprite();
         return;
     }
 
@@ -162,7 +165,6 @@ void display_render(const CalEvent &ev, bool offline) {
     static const char *DAYS[] = {"SUN","MON","TUE","WED","THU","FRI","SAT"};
     static const char *MONS[] = {"JAN","FEB","MAR","APR","MAY","JUN",
                                   "JUL","AUG","SEP","OCT","NOV","DEC"};
-    // weekday(): 1=Sun..7=Sat; month(): 1..12; day(): 1..31
     char date_buf[20];
     snprintf(date_buf, sizeof(date_buf), "%s %02d %s",
              DAYS[weekday() - 1], day(), MONS[month() - 1]);
@@ -175,27 +177,26 @@ void display_render(const CalEvent &ev, bool offline) {
     s_spr.setFreeFont(&Orbitron_Medium_20);
     s_spr.setTextColor(C_TEXT_1, C_BG_BASE);
 
-    int tlen = (int)strlen(ev.title);
-    if (tlen <= 18) {
+    int tlen = (int)strlen(title);
+    if (tlen <= 26) {
         s_spr.setCursor(PAD + 4, TITLE_Y);
-        s_spr.print(ev.title);
+        s_spr.print(title);
     } else {
-        // Find word-break point
-        char line1[22];
-        strncpy(line1, ev.title, 18);
-        line1[18] = '\0';
-        int break_pos = 17;
-        for (int i = 17; i > 6; i--) {
+        char line1[30];
+        strncpy(line1, title, 26);
+        line1[26] = '\0';
+        int break_pos = 25;
+        for (int i = 25; i > 6; i--) {
             if (line1[i] == ' ') { break_pos = i; break; }
         }
         line1[break_pos] = '\0';
 
-        const char *rest = ev.title + break_pos + (ev.title[break_pos] == ' ' ? 1 : 0);
-        char line2[22];
-        strncpy(line2, rest, 18);
-        line2[18] = '\0';
-        if (strlen(rest) > 18) {
-            line2[15] = '.'; line2[16] = '.'; line2[17] = '.'; line2[18] = '\0';
+        const char *rest = title + break_pos + (title[break_pos] == ' ' ? 1 : 0);
+        char line2[30];
+        strncpy(line2, rest, 26);
+        line2[26] = '\0';
+        if (strlen(rest) > 26) {
+            line2[23] = '.'; line2[24] = '.'; line2[25] = '.'; line2[26] = '\0';
         }
 
         s_spr.setCursor(PAD + 4, TITLE_Y);
@@ -205,72 +206,102 @@ void display_render(const CalEvent &ev, bool offline) {
     }
 
     // Time row: "18:00 -> 19:30"
-    if (!ev.is_all_day && ev.time_start[0]) {
+    if (!is_all_day && time_start[0]) {
         s_spr.setFreeFont(TIMEFONT);
         s_spr.setTextColor(C_TEXT_2, C_BG_BASE);
-        char time_buf[14];
-        snprintf(time_buf, sizeof(time_buf), "%s -> %s", ev.time_start, ev.time_end);
+        char time_buf[15];
+        snprintf(time_buf, sizeof(time_buf), "%s -> %s", time_start, time_end);
         s_spr.setCursor(PAD + 4, TIME_Y);
         s_spr.print(time_buf);
     }
 
     // Location row: "@ Venue Name"
-    if (ev.location[0] != '\0') {
+    if (location[0] != '\0') {
         s_spr.setFreeFont(LINEFONT);
         s_spr.setTextColor(C_TEXT_2, C_BG_BASE);
         char loc_buf[35];
-        snprintf(loc_buf, sizeof(loc_buf), "@ %.30s", ev.location);
+        snprintf(loc_buf, sizeof(loc_buf), "@ %.30s", location);
         s_spr.setCursor(PAD + 4, LOC_Y);
         s_spr.print(loc_buf);
     }
 
-    // Progress bar — only during event (between start and end)
-    if (!ev.is_all_day && ev.ts_start && ev.ts_end) {
+    // Progress bar — only for the primary event slot during the event
+    if (show_progress && !is_all_day && ts_start && ts_end) {
         int32_t now32 = (int32_t)now();
-        if (now32 >= ev.ts_start && now32 <= ev.ts_end) {
+        if (now32 >= ts_start && now32 <= ts_end) {
             int bar_x = PAD + 4;
             int bar_w = W - PAD * 2 - 8;
             s_spr.fillRoundRect(bar_x, BAR_Y, bar_w, BAR_H, 3, C_BG_ACTIVE);
-            int32_t duration = ev.ts_end - ev.ts_start;
-            int32_t elapsed  = now32 - ev.ts_start;
+            int32_t duration = ts_end - ts_start;
+            int32_t elapsed  = now32 - ts_start;
             int fill = (duration > 0) ? (int)((long)bar_w * elapsed / duration) : 0;
             if (fill > 0)
                 s_spr.fillRoundRect(bar_x, BAR_Y, fill, BAR_H, 3, C_ACCENT);
         }
     }
+}
 
+void display_render(const CalEvent &ev, bool offline) {
+    s_show_next = false;  // reset to primary slot on full re-render
+    s_spr.fillSprite(C_BG_BASE);
+    draw_header(offline);
+    draw_event_content(ev.title, ev.location, ev.time_start, ev.time_end,
+                       ev.is_all_day, ev.ts_start, ev.ts_end, ev.has_event, true);
     push_sprite();
 }
 
 void display_update_clock(bool offline) {
-    // Redraw only the header strip, then push full sprite
+    // Clear header strip before redrawing to prevent ghost digits
+    s_spr.fillRect(0, 0, W, HDR_H, C_BG_BASE);
     draw_header(offline);
     push_sprite();
 }
 
-void display_update_progress(const CalEvent &ev) {
-    if (ev.is_all_day || !ev.ts_start || !ev.ts_end) return;
 
-    int bar_x = PAD + 4;
-    int bar_w = W - PAD * 2 - 8;
-
-    // Clear bar area
-    s_spr.fillRoundRect(bar_x, BAR_Y, bar_w, BAR_H, 3, C_BG_ACTIVE);
-
-    int32_t now32 = (int32_t)now();
-    if (now32 >= ev.ts_start && now32 <= ev.ts_end) {
-        int32_t duration = ev.ts_end - ev.ts_start;
-        int32_t elapsed  = now32 - ev.ts_start;
-        int fill = (duration > 0) ? (int)((long)bar_w * elapsed / duration) : 0;
-        if (fill > 0)
-            s_spr.fillRoundRect(bar_x, BAR_Y, fill, BAR_H, 3, C_ACCENT);
+// Fade out via backlight PWM → switch event slot → fade back in.
+void display_breathe(const CalEvent &ev, bool offline) {
+    // Decide which slot to show after the transition
+    bool show_next_after = !s_show_next;
+    if (show_next_after && !ev.next_has_event) {
+        show_next_after = false;
     }
 
+    // --- Fade out: dim backlight from s_brightness → 0 ---
+    for (int b = (int)s_brightness; b >= 0; b -= 3) {
+        ledcWrite(0, (uint8_t)b);
+        delay(6);
+    }
+    ledcWrite(0, 0);
+
+    // --- Switch slot and render new content while screen is dark ---
+    s_show_next = show_next_after;
+
+    s_spr.fillSprite(C_BG_BASE);
+    draw_header(offline);
+    if (s_show_next) {
+        draw_event_content(ev.next_title, ev.next_location,
+                           ev.next_time_start, ev.next_time_end,
+                           ev.next_is_all_day,
+                           ev.next_ts_start, ev.next_ts_end,
+                           ev.next_has_event, false);
+    } else {
+        draw_event_content(ev.title, ev.location,
+                           ev.time_start, ev.time_end,
+                           ev.is_all_day,
+                           ev.ts_start, ev.ts_end,
+                           ev.has_event, true);
+    }
     push_sprite();
+
+    // --- Fade in: brighten backlight from 0 → s_brightness ---
+    for (int b = 0; b <= (int)s_brightness; b += 3) {
+        ledcWrite(0, (uint8_t)b);
+        delay(6);
+    }
+    ledcWrite(0, s_brightness);
 }
 
-void display_advance_pixel_shift() {
-    s_shift_step = (s_shift_step + 1) % 4;
-    s_shift_x = SHIFTS[s_shift_step][0];
-    s_shift_y = SHIFTS[s_shift_step][1];
+void display_set_brightness(uint8_t level) {
+    s_brightness = level;
+    ledcWrite(0, s_brightness);
 }
